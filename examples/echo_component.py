@@ -16,6 +16,10 @@ from optparse import OptionParser
 
 import sleekxmpp
 from sleekxmpp.componentxmpp import ComponentXMPP
+from sleekxmpp.xmlstream.handler.callback import Callback
+from sleekxmpp.xmlstream.matcher.xpath import MatchXPath
+
+from backend import SimpleBackend
 
 # Python versions before 3.0 do not use UTF-8 encoding
 # by default. To ensure that Unicode is handled properly
@@ -36,14 +40,33 @@ class EchoComponent(ComponentXMPP):
 
     def __init__(self, jid, secret, server, port):
         ComponentXMPP.__init__(self, jid, secret, server, port)
-
+        self.backend = SimpleBackend()
         # You don't need a session_start handler, but that is
         # where you would broadcast initial presence.
 
         # The message event is triggered whenever a message
         # stanza is received. Be aware that that includes
         # MUC messages and error messages.
-        self.add_event_handler("message", self.message)
+
+        self.add_event_handler("session_start", self.start)
+        # self.add_event_handler("message", self.message)
+        self.add_event_handler("changed_subscription",  self.handleXMPPPresenceSubscription)
+        self.add_event_handler("got_presence_probe", self.handleXMPPPresenceProbe)
+        for event in ["message", "got_online", "got_offline", "changed_status"] :
+          self.add_event_handler(event, self.handleIncomingXMPPEvent)
+        #
+        self.backend.addMessageHandler(self.handleMessageAddedToBackend)
+
+        xpath = "{%s}iq/{cnry:sleep:1}sleep" % self.default_ns
+
+        self.registerHandler(Callback('Sleep command handler', MatchXPath(xpath), self.handle_sleep))
+
+    def start(self, event) :
+        self.sendPresence(pfrom='test@localhost', pto='claudio@localhost')
+        # self.sendPresence(pfrom='sleep.localhost@localhost', pto='claudio@localhost')
+        # for user in self.backend.getAllUsers() :
+        #     self.sendPresenceOfAllContactsForUser(user)
+
 
     def message(self, msg):
         """
@@ -63,6 +86,57 @@ class EchoComponent(ComponentXMPP):
         # The reply method will use the messages 'to' JID as the
         # outgoing reply's 'from' JID.
         msg.reply("Thanks for sending\n%(body)s" % msg).send()
+
+    def handleXMPPPresenceSubscription(self, subscription) :
+        if subscription["type"] == "subscribe" :
+          userJID = subscription["from"]
+          self.sendPresenceSubscription(pto=userJID, ptype="subscribed")
+          self.sendPresence(pto = userJID)
+          self.sendPresenceSubscription(pto=userJID, ptype="subscribe")
+
+    def handleXMPPPresenceProbe(self, event) :
+        self.sendPresence(pto = self.backend.getJIDForUser(user))
+
+    def handleIncomingXMPPEvent(self, event) :
+        message = event["message"]
+        user = self.backend.getUserFromJID(event["jid"])
+        self.backend.addMessageFromUser(message, user)
+
+    def handleMessageAddedToBackend(self, message) :
+        body = message.user + ": " + message.text
+        for subscriberJID in self.backend.getSubscriberJIDs(message.user) :
+          self.sendMessage(subscriberJID, body)
+        
+    def sendPresenceOfAllContactsForUser(self, user) :
+        userJID = self.backend.getJIDForUser(user)
+        for contact in self.backend.getContacts(user) :
+          contactJID = self.getComponentJIDFromUser(contact)
+          self.sendPresenceOfContactToUser(contactJID = contactJID, userJID = userJID)
+
+    def sendPresenceOfContactToUser(self, contactJID, userJID) :
+        message = self.backend.getLastMessage(contactJID).text
+        self.xmpp.sendPresence(pto = userJID, pfrom = contactJID, pshow = message)
+
+    def sendAllContactSubscriptionRequestsToUser(self, userJID) :
+        user = self.backend.getUserFromJID(userJID)
+        for contact in self.backend.getContacts(user) :
+          contactJID = self.getComponentJIDFromUser(contact)
+          self.xmpp.sendPresenceSubscription(
+              pfrom=contactJID, pto=userJID, ptype="subscribe", pnick=contact)
+
+    def addRecipientToMessage(self, message, recipientJID) :
+        contact = self.getUserFromComponentJID(recipientJID)
+        return ("@" + contact if contact else "") + " " + message
+
+    def getUserFromComponentJID(self, jid) :
+        return jid.split("@",1)[0] if "@" in jid else None
+
+    def getComponentJIDFromUser(self, user) :
+        return user + "@" + self.componentDomain
+    
+    def handle_sleep(self, iq):
+        self.sendPresence(pfrom='test@localhost', pto='claudio@localhost', ptype='unavailable')
+        print "(iq) = %s" % str(iq)
 
 
 if __name__ == '__main__':
